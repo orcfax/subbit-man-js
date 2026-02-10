@@ -686,7 +686,6 @@ async function l1Routes(fastify) {
             subbit.utxo,
             closed,
             iouAmount,
-            iouSignature,
             redeemer,
           );
         }

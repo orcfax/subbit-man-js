@@ -321,6 +321,409 @@ async function l1Routes(fastify) {
   });
 
   // ──────────────────────────────────────────────────
+  // POST /l1/build-close
+  // Build an unsigned "Close" transaction to close an open channel
+  // ──────────────────────────────────────────────────
+  fastify.post(
+    "/l1/build-close",
+    {
+      schema: {
+        body: {
+          type: "object",
+          required: ["tag", "walletUtxos", "changeAddress"],
+          properties: {
+            tag: { type: "string" },
+            walletUtxos: { type: "array" },
+            changeAddress: { type: "string" },
+          },
+        },
+      },
+    },
+    async function (req, res) {
+      const { tag, walletUtxos, changeAddress } = req.body;
+      const { lucid: l, validatorAddress, validatorRef } = fastify.lucidCtx;
+
+      // Fetch channel UTxO by tag
+      let subbit;
+      try {
+        subbit = await tx.validator.getStateByTag(l, validatorAddress, tag);
+      } catch {
+        return res.notFound(
+          `Channel with tag "${tag}" not found on-chain.`,
+        );
+      }
+
+      if (subbit.state.kind !== "Opened") {
+        return res.badRequest(
+          `Channel is not in Opened state. Current state: ${subbit.state.kind}.`,
+        );
+      }
+
+      // Convert MeshJS UTxO format → Lucid format
+      const lucidUtxos = walletUtxos.map((utxo) => {
+        const assets = {};
+        for (const asset of utxo.output.amount) {
+          assets[asset.unit] = BigInt(asset.quantity);
+        }
+        return {
+          txHash: utxo.input.txHash,
+          outputIndex: utxo.input.outputIndex,
+          address: utxo.output.address,
+          assets,
+        };
+      });
+
+      l.selectWallet.fromAddress(changeAddress, lucidUtxos);
+
+      // Build transaction
+      let txBuilder;
+      if (validatorRef) {
+        txBuilder = await tx.txs.close.single(l, validatorRef, subbit);
+      } else {
+        const opened = subbit.state.value;
+        const now = BigInt(Date.now());
+        const redeemer = tx.validator.closeRed();
+        txBuilder = tx.txs.close.step(
+          l.newTx(),
+          subbit.utxo,
+          opened,
+          now,
+          redeemer,
+        );
+      }
+
+      const unsignedTx = await txBuilder.complete({ changeAddress });
+      const unsignedTxCbor = unsignedTx.toCBOR();
+
+      // Extract deadline from the built tx output datum
+      // close.single computes: deadline = (now + 300_000) + closePeriod + 1001
+      const opened = subbit.state.value;
+      const now = BigInt(Date.now());
+      const deadline = now + 300000n + opened.constants.closePeriod + 1001n;
+
+      return { unsignedTx: unsignedTxCbor, deadline: Number(deadline) };
+    },
+  );
+
+  // ──────────────────────────────────────────────────
+  // POST /l1/build-end
+  // Build an unsigned "End" transaction to reclaim funds from a settled channel
+  // ──────────────────────────────────────────────────
+  fastify.post(
+    "/l1/build-end",
+    {
+      schema: {
+        body: {
+          type: "object",
+          required: ["consumerKeyHash", "walletUtxos", "changeAddress"],
+          properties: {
+            consumerKeyHash: { type: "string" },
+            walletUtxos: { type: "array" },
+            changeAddress: { type: "string" },
+          },
+        },
+      },
+    },
+    async function (req, res) {
+      const { consumerKeyHash, walletUtxos, changeAddress } = req.body;
+      const { lucid: l, validatorAddress, validatorRef } = fastify.lucidCtx;
+
+      // Find settled channel by consumer key hash
+      const settled = await tx.validator.getSettledByConsumer(
+        l,
+        validatorAddress,
+        consumerKeyHash,
+      );
+
+      if (settled.length === 0) {
+        return res.notFound(
+          `No settled channel found for consumer "${consumerKeyHash}".`,
+        );
+      }
+
+      const subbit = settled[0];
+
+      // Convert MeshJS UTxO format → Lucid format
+      const lucidUtxos = walletUtxos.map((utxo) => {
+        const assets = {};
+        for (const asset of utxo.output.amount) {
+          assets[asset.unit] = BigInt(asset.quantity);
+        }
+        return {
+          txHash: utxo.input.txHash,
+          outputIndex: utxo.input.outputIndex,
+          address: utxo.output.address,
+          assets,
+        };
+      });
+
+      l.selectWallet.fromAddress(changeAddress, lucidUtxos);
+
+      // Build transaction
+      let txBuilder;
+      if (validatorRef) {
+        txBuilder = await tx.txs.end.single(l, validatorRef, subbit);
+      } else {
+        const consumer = subbit.state.value.consumer;
+        const redeemer = tx.validator.endRed();
+        txBuilder = tx.txs.end.step(
+          l.newTx(),
+          subbit.utxo,
+          consumer,
+          redeemer,
+        );
+      }
+
+      const unsignedTx = await txBuilder.complete({ changeAddress });
+      const unsignedTxCbor = unsignedTx.toCBOR();
+
+      return { unsignedTx: unsignedTxCbor };
+    },
+  );
+
+  // ──────────────────────────────────────────────────
+  // POST /l1/build-expire
+  // Build an unsigned "Expire" transaction to reclaim all funds after deadline
+  // ──────────────────────────────────────────────────
+  fastify.post(
+    "/l1/build-expire",
+    {
+      schema: {
+        body: {
+          type: "object",
+          required: ["tag", "walletUtxos", "changeAddress"],
+          properties: {
+            tag: { type: "string" },
+            walletUtxos: { type: "array" },
+            changeAddress: { type: "string" },
+          },
+        },
+      },
+    },
+    async function (req, res) {
+      const { tag, walletUtxos, changeAddress } = req.body;
+      const { lucid: l, validatorAddress, validatorRef } = fastify.lucidCtx;
+
+      // Fetch channel UTxO by tag
+      let subbit;
+      try {
+        subbit = await tx.validator.getStateByTag(l, validatorAddress, tag);
+      } catch {
+        return res.notFound(
+          `Channel with tag "${tag}" not found on-chain.`,
+        );
+      }
+
+      if (subbit.state.kind !== "Closed") {
+        return res.badRequest(
+          `Channel is not in Closed state. Current state: ${subbit.state.kind}.`,
+        );
+      }
+
+      // Verify deadline has passed
+      const closed = subbit.state.value;
+      const now = BigInt(Date.now());
+      if (now < closed.deadline) {
+        return res.badRequest(
+          `Deadline has not passed yet. Deadline: ${closed.deadline}, now: ${now}.`,
+        );
+      }
+
+      // Convert MeshJS UTxO format → Lucid format
+      const lucidUtxos = walletUtxos.map((utxo) => {
+        const assets = {};
+        for (const asset of utxo.output.amount) {
+          assets[asset.unit] = BigInt(asset.quantity);
+        }
+        return {
+          txHash: utxo.input.txHash,
+          outputIndex: utxo.input.outputIndex,
+          address: utxo.output.address,
+          assets,
+        };
+      });
+
+      l.selectWallet.fromAddress(changeAddress, lucidUtxos);
+
+      // Build transaction
+      let txBuilder;
+      if (validatorRef) {
+        txBuilder = await tx.txs.expire.single(l, validatorRef, subbit);
+      } else {
+        const redeemer = tx.validator.expireRed();
+        txBuilder = tx.txs.expire.step(
+          l.newTx(),
+          subbit.utxo,
+          closed,
+          now,
+          redeemer,
+        );
+      }
+
+      const unsignedTx = await txBuilder.complete({ changeAddress });
+      const unsignedTxCbor = unsignedTx.toCBOR();
+
+      return { unsignedTx: unsignedTxCbor };
+    },
+  );
+
+  // ──────────────────────────────────────────────────
+  // POST /l1/channel-on-chain-state
+  // Lightweight on-chain state lookup (bypasses LevelDB)
+  // ──────────────────────────────────────────────────
+  fastify.post(
+    "/l1/channel-on-chain-state",
+    {
+      schema: {
+        body: {
+          type: "object",
+          required: ["tag", "consumerKeyHash"],
+          properties: {
+            tag: { type: "string" },
+            consumerKeyHash: { type: "string" },
+          },
+        },
+      },
+    },
+    async function (req, res) {
+      const { tag, consumerKeyHash } = req.body;
+      const { lucid: l, validatorAddress } = fastify.lucidCtx;
+
+      // Step 1: Try getStatesByTag — finds Opened or Closed UTxOs (filters out Settled)
+      const byTag = await tx.validator.getStatesByTag(l, validatorAddress, tag);
+
+      if (byTag.length > 0) {
+        const subbit = byTag[0];
+        if (subbit.state.kind === "Closed") {
+          return {
+            state: "closed",
+            deadline: Number(subbit.state.value.deadline),
+          };
+        }
+        return { state: subbit.state.kind.toLowerCase() };
+      }
+
+      // Step 2: Try getSettledByConsumer — Settled datum only stores consumer vkh, not tag
+      const settled = await tx.validator.getSettledByConsumer(
+        l,
+        validatorAddress,
+        consumerKeyHash,
+      );
+
+      if (settled.length > 0) {
+        return { state: "settled" };
+      }
+
+      // Step 3: Neither found — UTxO destroyed (End or Expire already happened)
+      return { state: "not-found" };
+    },
+  );
+
+  // ──────────────────────────────────────────────────
+  // POST /l1/process-closed-channels
+  // Provider-side: auto-settle closed channels (not yet consumed by consumer app)
+  // ──────────────────────────────────────────────────
+  fastify.post("/l1/process-closed-channels", async function (req, res) {
+    const { lucid: l, validatorAddress, validatorRef, config } =
+      fastify.lucidCtx;
+
+    if (!config.ENABLE_IOU_PROCESSING) {
+      return { processed: 0, successful: 0, failed: 0 };
+    }
+
+    if (!config.PROVIDER_KEY_HASH) {
+      return res.badRequest("No provider key hash configured");
+    }
+
+    // Fetch all on-chain states and filter for Closed channels belonging to this provider
+    const subbits = await tx.validator.getStates(l, validatorAddress);
+    const closedChannels = subbits.filter(
+      (s) =>
+        s.state.kind === "Closed" &&
+        s.state.value.constants.provider === config.PROVIDER_KEY_HASH,
+    );
+
+    if (closedChannels.length === 0) {
+      return { processed: 0, successful: 0, failed: 0 };
+    }
+
+    const results = [];
+
+    for (const subbit of closedChannels) {
+      try {
+        const closed = subbit.state.value;
+        const keytag = closed.constants.tag;
+
+        // Look up latest IOU from DB
+        const ious = await fastify.getIous();
+        const iouEntry = Object.entries(ious).find(
+          ([, data]) => data.tag === keytag,
+        );
+
+        if (!iouEntry) {
+          results.push({ tag: keytag, success: false, error: "No IOU found" });
+          continue;
+        }
+
+        const [, iouData] = iouEntry;
+        const iouAmount = BigInt(iouData.iouAmt);
+        const iouSignature = iouData.sig;
+
+        // Build settle tx
+        let txBuilder;
+        if (validatorRef) {
+          txBuilder = await tx.txs.settle.single(
+            l,
+            validatorRef,
+            subbit,
+            iouAmount,
+            iouSignature,
+          );
+        } else {
+          const redeemer = tx.validator.settleRed(iouAmount, iouSignature);
+          txBuilder = tx.txs.settle.step(
+            l.newTx(),
+            subbit.utxo,
+            closed,
+            iouAmount,
+            iouSignature,
+            redeemer,
+          );
+        }
+
+        const unsignedTx = await txBuilder.complete();
+
+        if (config.DRY_RUN) {
+          results.push({ tag: keytag, success: true, dryRun: true });
+          continue;
+        }
+
+        const signedTx = await unsignedTx.sign.withWallet().complete();
+        const txHash = await signedTx.submit();
+        await l.awaitTx(txHash);
+
+        results.push({ tag: keytag, success: true, txHash });
+      } catch (error) {
+        results.push({
+          tag: subbit.state.value?.constants?.tag || "unknown",
+          success: false,
+          error: error.message,
+        });
+      }
+    }
+
+    const successful = results.filter((r) => r.success).length;
+
+    return {
+      processed: results.length,
+      successful,
+      failed: results.length - successful,
+      results,
+      timestamp: new Date().toISOString(),
+    };
+  });
+
+  // ──────────────────────────────────────────────────
   // POST /l1/utxos
   // Fetch UTxOs by output references
   // ──────────────────────────────────────────────────

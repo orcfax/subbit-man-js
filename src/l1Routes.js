@@ -4,6 +4,11 @@ import * as tx from "@subbit-tx/tx";
  * @import { FastifyInstance } from "fastify";
  * @param {FastifyInstance} fastify
  */
+/** Convert a raw UTF-8 tag string to the hex encoding used on-chain. */
+function tagToHex(tag) {
+  return Buffer.from(tag, "utf8").toString("hex");
+}
+
 async function l1Routes(fastify) {
   // Guard: skip if Lucid was not initialised (missing Blockfrost key)
   if (!fastify.lucidCtx) {
@@ -43,7 +48,7 @@ async function l1Routes(fastify) {
       // Fetch channel UTxO by tag
       let subbit;
       try {
-        subbit = await tx.validator.getStateByTag(l, validatorAddress, tag);
+        subbit = await tx.validator.getStateByTag(l, validatorAddress, tagToHex(tag));
       } catch {
         return res.notFound(
           `Channel with tag "${tag}" not found on-chain.`,
@@ -346,7 +351,7 @@ async function l1Routes(fastify) {
       // Fetch channel UTxO by tag
       let subbit;
       try {
-        subbit = await tx.validator.getStateByTag(l, validatorAddress, tag);
+        subbit = await tx.validator.getStateByTag(l, validatorAddress, tagToHex(tag));
       } catch {
         return res.notFound(
           `Channel with tag "${tag}" not found on-chain.`,
@@ -507,7 +512,7 @@ async function l1Routes(fastify) {
       // Fetch channel UTxO by tag
       let subbit;
       try {
-        subbit = await tx.validator.getStateByTag(l, validatorAddress, tag);
+        subbit = await tx.validator.getStateByTag(l, validatorAddress, tagToHex(tag));
       } catch {
         return res.notFound(
           `Channel with tag "${tag}" not found on-chain.`,
@@ -590,7 +595,7 @@ async function l1Routes(fastify) {
       const { lucid: l, validatorAddress } = fastify.lucidCtx;
 
       // Step 1: Try getStatesByTag — finds Opened or Closed UTxOs (filters out Settled)
-      const byTag = await tx.validator.getStatesByTag(l, validatorAddress, tag);
+      const byTag = await tx.validator.getStatesByTag(l, validatorAddress, tagToHex(tag));
 
       if (byTag.length > 0) {
         const subbit = byTag[0];

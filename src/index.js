@@ -2,6 +2,8 @@ import sensible from "@fastify/sensible";
 import { defaults } from "./options.js";
 import db from "./db/index.js";
 import routes from "./routes.js";
+import lucidPlugin from "./lucid.js";
+import l1Routes from "./l1Routes.js";
 import * as config from "./config.js";
 
 const options = {
@@ -26,7 +28,9 @@ function main(fastify, opts) {
   const c = config.parseOptions({ ...opts, ...config.env() });
   fastify.register(sensible);
   fastify.register(db, { config: c.db });
+  fastify.register(lucidPlugin);
   fastify.register(routes, { config: c.routes });
+  fastify.register(l1Routes);
 }
 
 export { options };

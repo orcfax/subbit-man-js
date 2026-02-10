@@ -19,6 +19,7 @@
     "@fastify/sensible": "^6.0.3",
     "@fastify/type-provider-json-schema-to-ts": "^5.0.0",
     "@harmoniclabs/crypto": "^0.3.0",
+    "@lucid-evolution/lucid": "^0.4.29",
     "@noble/ed25519": "^2.2.3",
     "@noble/hashes": "^1.8.0",
     "@subbit-tx/tx": "link:../subbit-xyz/js/packages/tx",

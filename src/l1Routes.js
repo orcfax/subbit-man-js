@@ -222,82 +222,147 @@ async function l1Routes(fastify) {
       return { processed: 0, successful: 0, failed: 0 };
     }
 
+    // Fetch all UTxOs at the validator address once
+    const allUtxos = await l.utxosAt(validatorAddress);
+
     const results = [];
+    /** @type {Array<{keytag: string, subbit: any, utxo: any, iouAmount: bigint, iouSignature: string}>} */
+    const subJobs = [];
 
     for (const [keytag, iouData] of Object.entries(ious)) {
+      if (!iouData.txId || iouData.outputIdx === undefined) {
+        results.push({ keytag, success: false, error: "Missing UTXO reference" });
+        continue;
+      }
+
+      const utxo = allUtxos.find(
+        (u) =>
+          u.txHash === iouData.txId &&
+          u.outputIndex === parseInt(iouData.outputIdx, 10),
+      );
+
+      if (!utxo) {
+        results.push({
+          keytag,
+          success: false,
+          error: `UTXO not found: ${iouData.txId}#${iouData.outputIdx}`,
+        });
+        continue;
+      }
+
+      const subbit = tx.validator.utxo2Subbit(utxo);
+      if (!subbit || subbit.state.kind !== "Opened") {
+        results.push({ keytag, success: false, error: "Channel is not in Opened state" });
+        continue;
+      }
+
+      const iouAmount = BigInt(iouData.iouAmt);
+      const iouSignature = iouData.sig;
+
+      // Skip if nothing to claim (iouAmt <= subbed)
+      if (iouAmount <= subbit.state.value.subbed) {
+        continue;
+      }
+
+      if (!iouSignature) {
+        results.push({ keytag, success: false, error: "Missing IOU signature" });
+        continue;
+      }
+
+      subJobs.push({ keytag, subbit, utxo, iouAmount, iouSignature });
+    }
+
+    if (subJobs.length === 0) {
+      return {
+        processed: results.length,
+        successful: 0,
+        failed: results.filter((r) => !r.success).length,
+        results,
+        timestamp: new Date().toISOString(),
+      };
+    }
+
+    if (config.DRY_RUN) {
+      for (const job of subJobs) {
+        results.push({ keytag: job.keytag, success: true, dryRun: true });
+      }
+      const successful = subJobs.length;
+      return {
+        processed: results.length,
+        successful,
+        failed: results.length - successful,
+        results,
+        timestamp: new Date().toISOString(),
+      };
+    }
+
+    // Batch sub via batch.tx() if reference script available
+    // TODO: Fee analysis before sub (ensure tx fee doesn't exceed claimed amount)
+    if (validatorRef && subJobs.length > 0) {
       try {
-        if (!iouData.txId || iouData.outputIdx === undefined) {
-          results.push({
-            keytag,
-            success: false,
-            error: "Missing UTXO reference",
-          });
-          continue;
-        }
+        /** @type {import("@subbit-tx/tx").validator.SubbitStep[]} */
+        const steps = subJobs.map((job) => ({
+          utxo: job.utxo,
+          state: job.subbit.state.value,
+          step: "sub",
+          amt: job.iouAmount,
+          sig: job.iouSignature,
+        }));
 
-        const utxos = await l.utxosAt(validatorAddress);
-        const utxo = utxos.find(
-          (u) =>
-            u.txHash === iouData.txId &&
-            u.outputIndex === parseInt(iouData.outputIdx, 10),
-        );
-
-        if (!utxo) {
-          results.push({
-            keytag,
-            success: false,
-            error: `UTXO not found: ${iouData.txId}#${iouData.outputIdx}`,
-          });
-          continue;
-        }
-
-        const subbit = tx.validator.utxo2Subbit(utxo);
-        if (!subbit || subbit.state.kind !== "Opened") {
-          results.push({
-            keytag,
-            success: false,
-            error: "Channel is not in Opened state",
-          });
-          continue;
-        }
-
-        const iouAmount = BigInt(iouData.iouAmt);
-        const iouSignature = iouData.sig;
-
-        let txBuilder;
-        if (validatorRef) {
-          txBuilder = await tx.txs.sub.single(
-            l,
-            validatorRef,
-            subbit,
-            iouAmount,
-            iouSignature,
-          );
-        } else {
-          const redeemer = tx.validator.subRed(iouAmount, iouSignature);
-          txBuilder = tx.txs.sub.step(
-            l.newTx(),
-            utxo,
-            subbit.state.value,
-            iouAmount,
-            redeemer,
-          );
-        }
-
+        const txBuilder = await tx.txs.batch.tx(l, validatorRef, steps);
         const unsignedTx = await txBuilder.complete();
-
-        if (config.DRY_RUN) {
-          results.push({ keytag, success: true });
-          continue;
-        }
-
         const signedTx = await unsignedTx.sign.withWallet().complete();
         const txHash = await signedTx.submit();
-        await l.awaitTx(txHash);
 
-        results.push({ keytag, success: true, txHash });
+        // Async confirmation
+        l.awaitTx(txHash).then(
+          () => fastify.log.info(`[process-ious] Batch confirmed: ${txHash}`),
+          (err) => fastify.log.warn(`[process-ious] Batch confirmation failed: ${err.message}`),
+        );
+
+        for (const job of subJobs) {
+          results.push({ keytag: job.keytag, success: true, txHash });
+        }
       } catch (error) {
-        results.push({ keytag, success: false, error: error.message });
+        fastify.log.error(`[process-ious] Batch sub failed: ${error.message}`);
+        // On batch failure, log and let the next cycle retry
+        for (const job of subJobs) {
+          results.push({ keytag: job.keytag, success: false, error: error.message });
+        }
+      }
+    } else {
+      // Fallback: single-tx sub per channel
+      for (const job of subJobs) {
+        try {
+          let txBuilder;
+          if (validatorRef) {
+            txBuilder = await tx.txs.sub.single(
+              l,
+              validatorRef,
+              job.subbit,
+              job.iouAmount,
+              job.iouSignature,
+            );
+          } else {
+            const redeemer = tx.validator.subRed(job.iouAmount, job.iouSignature);
+            txBuilder = tx.txs.sub.step(
+              l.newTx(),
+              job.utxo,
+              job.subbit.state.value,
+              job.iouAmount,
+              redeemer,
+            );
+          }
+
+          const unsignedTx = await txBuilder.complete();
+          const signedTx = await unsignedTx.sign.withWallet().complete();
+          const txHash = await signedTx.submit();
+          await l.awaitTx(txHash);
+
+          results.push({ keytag: job.keytag, success: true, txHash });
+        } catch (error) {
+          results.push({ keytag: job.keytag, success: false, error: error.message });
+        }
       }
     }
 
@@ -652,28 +717,212 @@ async function l1Routes(fastify) {
       return { processed: 0, successful: 0, failed: 0 };
     }
 
+    // Fetch all IOUs once before the loop
+    const ious = await fastify.getIous();
     const results = [];
 
-    for (const subbit of closedChannels) {
-      try {
-        const closed = subbit.state.value;
-        const keytag = closed.constants.tag;
+    // Collect settle steps for batch transaction
+    /** @type {Array<{subbit: any, iouAmount: bigint, iouSignature: string, tagHex: string}>} */
+    const settleJobs = [];
 
-        // Look up latest IOU from DB
-        const ious = await fastify.getIous();
-        const iouEntry = Object.entries(ious).find(
-          ([, data]) => data.tag === keytag,
+    for (const subbit of closedChannels) {
+      const closed = subbit.state.value;
+      const onChainTagHex = closed.constants.tag;
+
+      // Fix: match by comparing keytag suffix (last N chars = tag hex) against on-chain tag
+      const iouEntry = Object.entries(ious).find(
+        ([keytagHex]) => keytagHex.slice(64) === onChainTagHex,
+      );
+
+      if (!iouEntry) {
+        results.push({ tag: onChainTagHex, success: false, error: "No IOU found" });
+        continue;
+      }
+
+      const [, iouData] = iouEntry;
+      const iouAmount = BigInt(iouData.iouAmt);
+      const iouSignature = iouData.sig;
+
+      if (iouAmount <= 0n || !iouSignature) {
+        results.push({ tag: onChainTagHex, success: false, error: "No claimable IOU amount" });
+        continue;
+      }
+
+      settleJobs.push({ subbit, iouAmount, iouSignature, tagHex: onChainTagHex });
+    }
+
+    if (settleJobs.length === 0) {
+      return {
+        processed: results.length,
+        successful: 0,
+        failed: results.length,
+        results,
+        timestamp: new Date().toISOString(),
+      };
+    }
+
+    if (config.DRY_RUN) {
+      for (const job of settleJobs) {
+        results.push({ tag: job.tagHex, success: true, dryRun: true });
+      }
+      return {
+        processed: results.length,
+        successful: settleJobs.length,
+        failed: results.length - settleJobs.length,
+        results,
+        timestamp: new Date().toISOString(),
+      };
+    }
+
+    // Batch settle via batch.tx() if reference script available and multiple jobs
+    if (validatorRef && settleJobs.length > 0) {
+      try {
+        /** @type {import("@subbit-tx/tx").validator.SubbitStep[]} */
+        const steps = settleJobs.map((job) => ({
+          utxo: job.subbit.utxo,
+          state: job.subbit.state.value,
+          step: "settle",
+          amt: job.iouAmount,
+          sig: job.iouSignature,
+        }));
+
+        const txBuilder = await tx.txs.batch.tx(l, validatorRef, steps);
+        const unsignedTx = await txBuilder.complete();
+        const signedTx = await unsignedTx.sign.withWallet().complete();
+        const txHash = await signedTx.submit();
+
+        // Async confirmation
+        l.awaitTx(txHash).then(
+          () => fastify.log.info(`[process-closed-channels] Batch confirmed: ${txHash}`),
+          (err) => fastify.log.warn(`[process-closed-channels] Batch confirmation failed: ${err.message}`),
         );
 
-        if (!iouEntry) {
-          results.push({ tag: keytag, success: false, error: "No IOU found" });
-          continue;
+        for (const job of settleJobs) {
+          results.push({ tag: job.tagHex, success: true, txHash });
         }
+      } catch (error) {
+        fastify.log.error(`[process-closed-channels] Batch settle failed: ${error.message}`);
+        for (const job of settleJobs) {
+          results.push({ tag: job.tagHex, success: false, error: error.message });
+        }
+      }
+    } else {
+      // Fallback: single-tx settle per channel
+      for (const job of settleJobs) {
+        try {
+          let txBuilder;
+          if (validatorRef) {
+            txBuilder = await tx.txs.settle.single(
+              l,
+              validatorRef,
+              job.subbit,
+              job.iouAmount,
+              job.iouSignature,
+            );
+          } else {
+            const redeemer = tx.validator.settleRed(job.iouAmount, job.iouSignature);
+            txBuilder = tx.txs.settle.step(
+              l.newTx(),
+              job.subbit.utxo,
+              job.subbit.state.value,
+              job.iouAmount,
+              redeemer,
+            );
+          }
 
-        const [, iouData] = iouEntry;
-        const iouAmount = BigInt(iouData.iouAmt);
-        const iouSignature = iouData.sig;
+          const unsignedTx = await txBuilder.complete();
+          const signedTx = await unsignedTx.sign.withWallet().complete();
+          const txHash = await signedTx.submit();
+          await l.awaitTx(txHash);
 
+          results.push({ tag: job.tagHex, success: true, txHash });
+        } catch (error) {
+          results.push({ tag: job.tagHex, success: false, error: error.message });
+        }
+      }
+    }
+
+    const successful = results.filter((r) => r.success).length;
+
+    return {
+      processed: results.length,
+      successful,
+      failed: results.length - successful,
+      results,
+      timestamp: new Date().toISOString(),
+    };
+  });
+
+  // ──────────────────────────────────────────────────
+  // POST /l1/settle-channel
+  // Settle a specific closed channel by tag (triggered by portal after consumer close)
+  // ──────────────────────────────────────────────────
+  fastify.post(
+    "/l1/settle-channel",
+    {
+      schema: {
+        body: {
+          type: "object",
+          required: ["tag"],
+          properties: {
+            tag: { type: "string" },
+          },
+        },
+      },
+    },
+    async function (req, res) {
+      const { tag } = req.body;
+      const { lucid: l, validatorAddress, validatorRef, config } =
+        fastify.lucidCtx;
+
+      if (!config.ENABLE_IOU_PROCESSING) {
+        return { success: false, error: "IOU processing not enabled" };
+      }
+
+      // Sync from chain first to ensure DB state matches L1
+      try {
+        await fastify.inject({
+          method: "POST",
+          url: "/l1/sync-from-chain",
+          payload: {},
+        });
+      } catch (err) {
+        fastify.log.warn(`[settle-channel] Pre-settle sync failed: ${err.message}`);
+      }
+
+      const tagHex = tagToHex(tag);
+
+      // Find the Closed channel on-chain
+      let subbit;
+      try {
+        subbit = await tx.validator.getStateByTag(l, validatorAddress, tagHex);
+      } catch {
+        return { success: false, error: `Channel with tag "${tag}" not found on-chain` };
+      }
+
+      if (subbit.state.kind !== "Closed") {
+        return { success: false, error: `Channel is not Closed (state: ${subbit.state.kind})` };
+      }
+
+      // Look up IOU from DB — match keytag suffix against on-chain tag hex
+      const ious = await fastify.getIous();
+      const iouEntry = Object.entries(ious).find(
+        ([keytagHex]) => keytagHex.slice(64) === tagHex,
+      );
+
+      if (!iouEntry) {
+        return { success: false, error: "No IOU found for this channel" };
+      }
+
+      const [, iouData] = iouEntry;
+      const iouAmount = BigInt(iouData.iouAmt);
+      const iouSignature = iouData.sig;
+
+      if (iouAmount <= 0n || !iouSignature) {
+        return { success: false, error: "IOU has no claimable amount or missing signature" };
+      }
+
+      try {
         // Build settle tx
         let txBuilder;
         if (validatorRef) {
@@ -689,7 +938,7 @@ async function l1Routes(fastify) {
           txBuilder = tx.txs.settle.step(
             l.newTx(),
             subbit.utxo,
-            closed,
+            subbit.state.value,
             iouAmount,
             redeemer,
           );
@@ -698,33 +947,73 @@ async function l1Routes(fastify) {
         const unsignedTx = await txBuilder.complete();
 
         if (config.DRY_RUN) {
-          results.push({ tag: keytag, success: true, dryRun: true });
-          continue;
+          return { success: true, tag, dryRun: true };
         }
 
         const signedTx = await unsignedTx.sign.withWallet().complete();
         const txHash = await signedTx.submit();
-        await l.awaitTx(txHash);
 
-        results.push({ tag: keytag, success: true, txHash });
+        // Async confirmation — don't block response
+        l.awaitTx(txHash).then(
+          () => fastify.log.info(`[settle-channel] Confirmed: ${txHash}`),
+          (err) => fastify.log.warn(`[settle-channel] Confirmation failed: ${err.message}`),
+        );
+
+        return { success: true, txHash, tag };
       } catch (error) {
-        results.push({
-          tag: subbit.state.value?.constants?.tag || "unknown",
-          success: false,
-          error: error.message,
-        });
+        fastify.log.error(`[settle-channel] Failed: ${error.message}`);
+        return { success: false, error: error.message, tag };
       }
+    },
+  );
+
+  // ──────────────────────────────────────────────────
+  // POST /l1/liaison-run
+  // Manual trigger for full liaison cycle
+  // ──────────────────────────────────────────────────
+  fastify.post("/l1/liaison-run", async function (req, res) {
+    if (fastify.runLiaisonCycle) {
+      const result = await fastify.runLiaisonCycle("manual");
+      return result;
     }
 
-    const successful = results.filter((r) => r.success).length;
+    // Fallback: run steps sequentially via inject
+    const results = {};
 
-    return {
-      processed: results.length,
-      successful,
-      failed: results.length - successful,
-      results,
-      timestamp: new Date().toISOString(),
-    };
+    try {
+      const syncRes = await fastify.inject({
+        method: "POST",
+        url: "/l1/sync-from-chain",
+        payload: {},
+      });
+      results.sync = JSON.parse(syncRes.payload);
+    } catch (err) {
+      results.sync = { error: err.message };
+    }
+
+    try {
+      const settleRes = await fastify.inject({
+        method: "POST",
+        url: "/l1/process-closed-channels",
+        payload: {},
+      });
+      results.settle = JSON.parse(settleRes.payload);
+    } catch (err) {
+      results.settle = { error: err.message };
+    }
+
+    try {
+      const subRes = await fastify.inject({
+        method: "POST",
+        url: "/l1/process-ious",
+        payload: {},
+      });
+      results.subs = JSON.parse(subRes.payload);
+    } catch (err) {
+      results.subs = { error: err.message };
+    }
+
+    return { trigger: "manual-fallback", results, timestamp: new Date().toISOString() };
   });
 
   // ──────────────────────────────────────────────────

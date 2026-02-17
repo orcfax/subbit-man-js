@@ -4,13 +4,14 @@ import db from "./db/index.js";
 import routes from "./routes.js";
 import lucidPlugin from "./lucid.js";
 import l1Routes from "./l1Routes.js";
+import liaison from "./liaison.js";
 import * as config from "./config.js";
 
 const options = {
   dbPath: "./db",
   provider: defaults.provider,
   currency: "Ada",
-  closePeriod: String(60 * 60 * 1000),
+  closePeriod: String(24 * 60 * 60 * 1000),
   tagLength: "20",
   nowThreshold: String(60 * 60 * 1000),
   fixedSeed: defaults.fixedSeed,
@@ -31,6 +32,7 @@ function main(fastify, opts) {
   fastify.register(lucidPlugin);
   fastify.register(routes, { config: c.routes });
   fastify.register(l1Routes);
+  fastify.register(liaison);
 }
 
 export { options };

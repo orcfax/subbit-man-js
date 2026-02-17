@@ -17,6 +17,103 @@ async function l1Routes(fastify) {
   }
 
   // ──────────────────────────────────────────────────
+  // POST /l1/build-open
+  // Build an unsigned "Open" transaction to create a new channel
+  // ──────────────────────────────────────────────────
+  fastify.post(
+    "/l1/build-open",
+    {
+      schema: {
+        body: {
+          type: "object",
+          required: [
+            "tag",
+            "amount",
+            "iouKey",
+            "consumerKeyHash",
+            "walletUtxos",
+            "changeAddress",
+          ],
+          properties: {
+            tag: { type: "string" },
+            amount: { type: "string" },
+            iouKey: { type: "string" },
+            consumerKeyHash: { type: "string" },
+            walletUtxos: { type: "array" },
+            changeAddress: { type: "string" },
+          },
+        },
+      },
+    },
+    async function (req, res) {
+      const { tag, amount, iouKey, consumerKeyHash, walletUtxos, changeAddress } =
+        req.body;
+      const { lucid: l, validatorRef, config } = fastify.lucidCtx;
+
+      const amountBigInt = BigInt(amount);
+      if (amountBigInt <= 0n) {
+        return res.badRequest("Amount must be greater than 0");
+      }
+
+      if (!validatorRef) {
+        return res.badRequest(
+          "Validator reference script not configured. Set SUBBIT_MAN_SUBBIT_REFERENCE_UTXO.",
+        );
+      }
+
+      // Convert MeshJS UTxO format → Lucid format
+      const lucidUtxos = walletUtxos.map((utxo) => {
+        const assets = {};
+        for (const asset of utxo.output.amount) {
+          assets[asset.unit] = BigInt(asset.quantity);
+        }
+        return {
+          txHash: utxo.input.txHash,
+          outputIndex: utxo.input.outputIndex,
+          address: utxo.output.address,
+          assets,
+        };
+      });
+
+      l.selectWallet.fromAddress(changeAddress, lucidUtxos);
+
+      // Build constants for the channel datum
+      const constants = {
+        tag: tagToHex(tag),
+        currency: "Ada",
+        iouKey: iouKey,
+        consumer: consumerKeyHash,
+        provider: config.PROVIDER_KEY_HASH,
+        closePeriod: 86400000n,
+      };
+
+      // Build transaction
+      const txBuilder = await tx.txs.open.tx(
+        l,
+        validatorRef,
+        constants,
+        amountBigInt,
+      );
+
+      const unsignedTx = await txBuilder.complete({ changeAddress });
+      const unsignedTxCbor = unsignedTx.toCBOR();
+
+      const channelInfo = {
+        txId: "",
+        outputIdx: "0",
+        stage: "open",
+        cost: "0",
+        iouAmt: "0",
+        sub: "0",
+        subbitAmt: String(amountBigInt),
+        sig: "",
+      };
+
+      return { unsignedTx: unsignedTxCbor, channelInfo };
+    },
+  );
+
+  // ──────────────────────────────────────────────────
   // POST /l1/build-add
   // Build an unsigned "Add" transaction to add funds to an existing channel
   // ──────────────────────────────────────────────────

@@ -30,11 +30,6 @@ async function liaison(fastify) {
     return;
   }
 
-  if (!fastify.lucidCtx.config.ENABLE_IOU_PROCESSING) {
-    fastify.log.warn("[liaison] IOU processing not enabled — liaison disabled");
-    return;
-  }
-
   const intervalMs = parseInt(env("SYNC_INTERVAL_MS", "900000"), 10);
 
   let running = false;

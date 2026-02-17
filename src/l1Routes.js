@@ -177,15 +177,6 @@ async function l1Routes(fastify) {
         .map(formatChannelForSync)
         .filter(Boolean);
 
-      if (config.DRY_RUN) {
-        return {
-          success: true,
-          message: "DRY RUN — Would sync channels",
-          channelCount: channelsForSync.length,
-          timestamp: new Date().toISOString(),
-        };
-      }
-
       // POST to the existing /l1/sync endpoint (same Fastify instance)
       const syncRes = await fastify.inject({
         method: "POST",
@@ -210,10 +201,6 @@ async function l1Routes(fastify) {
   fastify.post("/l1/process-ious", async function (req, res) {
     const { lucid: l, validatorAddress, validatorRef, config } =
       fastify.lucidCtx;
-
-    if (!config.ENABLE_IOU_PROCESSING) {
-      return { processed: 0, successful: 0, failed: 0 };
-    }
 
     // Fetch pending IOUs from local DB
     const ious = await fastify.getIous();
@@ -277,20 +264,6 @@ async function l1Routes(fastify) {
         processed: results.length,
         successful: 0,
         failed: results.filter((r) => !r.success).length,
-        results,
-        timestamp: new Date().toISOString(),
-      };
-    }
-
-    if (config.DRY_RUN) {
-      for (const job of subJobs) {
-        results.push({ keytag: job.keytag, success: true, dryRun: true });
-      }
-      const successful = subJobs.length;
-      return {
-        processed: results.length,
-        successful,
-        failed: results.length - successful,
         results,
         timestamp: new Date().toISOString(),
       };
@@ -697,10 +670,6 @@ async function l1Routes(fastify) {
     const { lucid: l, validatorAddress, validatorRef, config } =
       fastify.lucidCtx;
 
-    if (!config.ENABLE_IOU_PROCESSING) {
-      return { processed: 0, successful: 0, failed: 0 };
-    }
-
     if (!config.PROVIDER_KEY_HASH) {
       return res.badRequest("No provider key hash configured");
     }
@@ -756,19 +725,6 @@ async function l1Routes(fastify) {
         processed: results.length,
         successful: 0,
         failed: results.length,
-        results,
-        timestamp: new Date().toISOString(),
-      };
-    }
-
-    if (config.DRY_RUN) {
-      for (const job of settleJobs) {
-        results.push({ tag: job.tagHex, success: true, dryRun: true });
-      }
-      return {
-        processed: results.length,
-        successful: settleJobs.length,
-        failed: results.length - settleJobs.length,
         results,
         timestamp: new Date().toISOString(),
       };
@@ -875,10 +831,6 @@ async function l1Routes(fastify) {
       const { lucid: l, validatorAddress, validatorRef, config } =
         fastify.lucidCtx;
 
-      if (!config.ENABLE_IOU_PROCESSING) {
-        return { success: false, error: "IOU processing not enabled" };
-      }
-
       // Sync from chain first to ensure DB state matches L1
       try {
         await fastify.inject({
@@ -945,10 +897,6 @@ async function l1Routes(fastify) {
         }
 
         const unsignedTx = await txBuilder.complete();
-
-        if (config.DRY_RUN) {
-          return { success: true, tag, dryRun: true };
-        }
 
         const signedTx = await unsignedTx.sign.withWallet().complete();
         const txHash = await signedTx.submit();

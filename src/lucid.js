@@ -14,9 +14,7 @@ import * as tx from "@subbit-tx/tx";
  * @property {string} config.BLOCKFROST_NETWORK
  * @property {string} config.PROVIDER_KEY_HASH
  * @property {string} config.PROVIDER_SIGNING_KEY
- * @property {boolean} config.ENABLE_IOU_PROCESSING
  * @property {string} config.SUBBIT_REFERENCE_UTXO
- * @property {boolean} config.DRY_RUN
  */
 
 /**
@@ -32,9 +30,7 @@ async function lucidPlugin(fastify) {
     BLOCKFROST_NETWORK: env("BLOCKFROST_NETWORK", "Preview"),
     PROVIDER_KEY_HASH: env("PROVIDER_KEY_HASH", ""),
     PROVIDER_SIGNING_KEY: env("PROVIDER_SIGNING_KEY", ""),
-    ENABLE_IOU_PROCESSING: env("ENABLE_IOU_PROCESSING", "false") === "true",
     SUBBIT_REFERENCE_UTXO: env("SUBBIT_REFERENCE_UTXO", ""),
-    DRY_RUN: env("DRY_RUN", "false") === "true",
   };
 
   if (!config.BLOCKFROST_API_KEY) {
@@ -61,10 +57,10 @@ async function lucidPlugin(fastify) {
   const validatorHash = lucid.validatorToScriptHash(validator);
   const validatorAddress = tx.validator.mkAddress(network, validatorHash);
 
-  // Set wallet if IOU processing is enabled
-  if (config.ENABLE_IOU_PROCESSING && config.PROVIDER_SIGNING_KEY) {
+  // Set wallet if provider signing key is available
+  if (config.PROVIDER_SIGNING_KEY) {
     l.selectWallet.fromPrivateKey(config.PROVIDER_SIGNING_KEY);
-    fastify.log.info("Provider wallet loaded for IOU processing");
+    fastify.log.info("Provider wallet loaded");
   }
 
   // Fetch reference script if configured

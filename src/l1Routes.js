@@ -1,4 +1,5 @@
 import * as tx from "@subbit-tx/tx";
+import { parseBigIntSafe, isNetworkError, parseLucidError } from "./errors.js";
 
 /**
  * @import { FastifyInstance } from "fastify";
@@ -50,7 +51,9 @@ async function l1Routes(fastify) {
         req.body;
       const { lucid: l, validatorRef, config } = fastify.lucidCtx;
 
-      const amountBigInt = BigInt(amount);
+      const parsed = parseBigIntSafe(amount, "amount");
+      if (!parsed.ok) return res.badRequest(parsed.message);
+      const amountBigInt = parsed.value;
       if (amountBigInt <= 0n) {
         return res.badRequest("Amount must be greater than 0");
       }
@@ -88,15 +91,25 @@ async function l1Routes(fastify) {
       };
 
       // Build transaction
-      const txBuilder = await tx.txs.open.tx(
-        l,
-        validatorRef,
-        constants,
-        amountBigInt,
-      );
+      let unsignedTxCbor;
+      try {
+        const txBuilder = await tx.txs.open.tx(
+          l,
+          validatorRef,
+          constants,
+          amountBigInt,
+        );
 
-      const unsignedTx = await txBuilder.complete({ changeAddress });
-      const unsignedTxCbor = unsignedTx.toCBOR();
+        const unsignedTx = await txBuilder.complete({ changeAddress });
+        unsignedTxCbor = unsignedTx.toCBOR();
+      } catch (err) {
+        const { statusCode, message } = parseLucidError(err, fastify.log);
+        return res.status(statusCode).send({
+          statusCode,
+          error: statusCode >= 500 ? "Internal Server Error" : "Bad Request",
+          message,
+        });
+      }
 
       const channelInfo = {
         txId: "",
@@ -137,7 +150,9 @@ async function l1Routes(fastify) {
       const { tag, amount, walletUtxos, changeAddress } = req.body;
       const { lucid: l, validatorAddress, validatorRef } = fastify.lucidCtx;
 
-      const amountBigInt = BigInt(amount);
+      const parsed = parseBigIntSafe(amount, "amount");
+      if (!parsed.ok) return res.badRequest(parsed.message);
+      const amountBigInt = parsed.value;
       if (amountBigInt <= 0n) {
         return res.badRequest("Amount must be greater than 0");
       }
@@ -146,7 +161,11 @@ async function l1Routes(fastify) {
       let subbit;
       try {
         subbit = await tx.validator.getStateByTag(l, validatorAddress, tagToHex(tag));
-      } catch {
+      } catch (err) {
+        if (isNetworkError(err)) {
+          const { statusCode, message } = parseLucidError(err, fastify.log);
+          return res.status(statusCode).send({ statusCode, error: "Service Unavailable", message });
+        }
         return res.notFound(
           `Channel with tag "${tag}" not found on-chain.`,
         );
@@ -175,27 +194,37 @@ async function l1Routes(fastify) {
       l.selectWallet.fromAddress(changeAddress, lucidUtxos);
 
       // Build transaction
-      let txBuilder;
-      if (validatorRef) {
-        txBuilder = await tx.txs.add.single(
-          l,
-          validatorRef,
-          subbit,
-          amountBigInt,
-        );
-      } else {
-        const redeemer = tx.validator.addRed();
-        txBuilder = tx.txs.add.step(
-          l.newTx(),
-          subbit.utxo,
-          subbit.state.value,
-          amountBigInt,
-          redeemer,
-        );
-      }
+      let unsignedTxCbor;
+      try {
+        let txBuilder;
+        if (validatorRef) {
+          txBuilder = await tx.txs.add.single(
+            l,
+            validatorRef,
+            subbit,
+            amountBigInt,
+          );
+        } else {
+          const redeemer = tx.validator.addRed();
+          txBuilder = tx.txs.add.step(
+            l.newTx(),
+            subbit.utxo,
+            subbit.state.value,
+            amountBigInt,
+            redeemer,
+          );
+        }
 
-      const unsignedTx = await txBuilder.complete({ changeAddress });
-      const unsignedTxCbor = unsignedTx.toCBOR();
+        const unsignedTx = await txBuilder.complete({ changeAddress });
+        unsignedTxCbor = unsignedTx.toCBOR();
+      } catch (err) {
+        const { statusCode, message } = parseLucidError(err, fastify.log);
+        return res.status(statusCode).send({
+          statusCode,
+          error: statusCode >= 500 ? "Internal Server Error" : "Bad Request",
+          message,
+        });
+      }
 
       const opened = subbit.state.value;
       const channelInfo = {
@@ -487,7 +516,11 @@ async function l1Routes(fastify) {
       let subbit;
       try {
         subbit = await tx.validator.getStateByTag(l, validatorAddress, tagToHex(tag));
-      } catch {
+      } catch (err) {
+        if (isNetworkError(err)) {
+          const { statusCode, message } = parseLucidError(err, fastify.log);
+          return res.status(statusCode).send({ statusCode, error: "Service Unavailable", message });
+        }
         return res.notFound(
           `Channel with tag "${tag}" not found on-chain.`,
         );
@@ -516,24 +549,34 @@ async function l1Routes(fastify) {
       l.selectWallet.fromAddress(changeAddress, lucidUtxos);
 
       // Build transaction
-      let txBuilder;
-      if (validatorRef) {
-        txBuilder = await tx.txs.close.single(l, validatorRef, subbit);
-      } else {
-        const opened = subbit.state.value;
-        const now = BigInt(Date.now());
-        const redeemer = tx.validator.closeRed();
-        txBuilder = tx.txs.close.step(
-          l.newTx(),
-          subbit.utxo,
-          opened,
-          now,
-          redeemer,
-        );
-      }
+      let unsignedTxCbor;
+      try {
+        let txBuilder;
+        if (validatorRef) {
+          txBuilder = await tx.txs.close.single(l, validatorRef, subbit);
+        } else {
+          const opened = subbit.state.value;
+          const now = BigInt(Date.now());
+          const redeemer = tx.validator.closeRed();
+          txBuilder = tx.txs.close.step(
+            l.newTx(),
+            subbit.utxo,
+            opened,
+            now,
+            redeemer,
+          );
+        }
 
-      const unsignedTx = await txBuilder.complete({ changeAddress });
-      const unsignedTxCbor = unsignedTx.toCBOR();
+        const unsignedTx = await txBuilder.complete({ changeAddress });
+        unsignedTxCbor = unsignedTx.toCBOR();
+      } catch (err) {
+        const { statusCode, message } = parseLucidError(err, fastify.log);
+        return res.status(statusCode).send({
+          statusCode,
+          error: statusCode >= 500 ? "Internal Server Error" : "Bad Request",
+          message,
+        });
+      }
 
       // Extract deadline from the built tx output datum
       // close.single computes: deadline = (now + 300_000) + closePeriod + 1001
@@ -569,11 +612,22 @@ async function l1Routes(fastify) {
       const { lucid: l, validatorAddress, validatorRef } = fastify.lucidCtx;
 
       // Find settled channel by consumer key hash
-      const settled = await tx.validator.getSettledByConsumer(
-        l,
-        validatorAddress,
-        consumerKeyHash,
-      );
+      let settled;
+      try {
+        settled = await tx.validator.getSettledByConsumer(
+          l,
+          validatorAddress,
+          consumerKeyHash,
+        );
+      } catch (err) {
+        if (isNetworkError(err)) {
+          const { statusCode, message } = parseLucidError(err, fastify.log);
+          return res.status(statusCode).send({ statusCode, error: "Service Unavailable", message });
+        }
+        return res.notFound(
+          `No settled channel found for consumer "${consumerKeyHash}".`,
+        );
+      }
 
       if (settled.length === 0) {
         return res.notFound(
@@ -600,22 +654,32 @@ async function l1Routes(fastify) {
       l.selectWallet.fromAddress(changeAddress, lucidUtxos);
 
       // Build transaction
-      let txBuilder;
-      if (validatorRef) {
-        txBuilder = await tx.txs.end.single(l, validatorRef, subbit);
-      } else {
-        const consumer = subbit.state.value.consumer;
-        const redeemer = tx.validator.endRed();
-        txBuilder = tx.txs.end.step(
-          l.newTx(),
-          subbit.utxo,
-          consumer,
-          redeemer,
-        );
-      }
+      let unsignedTxCbor;
+      try {
+        let txBuilder;
+        if (validatorRef) {
+          txBuilder = await tx.txs.end.single(l, validatorRef, subbit);
+        } else {
+          const consumer = subbit.state.value.consumer;
+          const redeemer = tx.validator.endRed();
+          txBuilder = tx.txs.end.step(
+            l.newTx(),
+            subbit.utxo,
+            consumer,
+            redeemer,
+          );
+        }
 
-      const unsignedTx = await txBuilder.complete({ changeAddress });
-      const unsignedTxCbor = unsignedTx.toCBOR();
+        const unsignedTx = await txBuilder.complete({ changeAddress });
+        unsignedTxCbor = unsignedTx.toCBOR();
+      } catch (err) {
+        const { statusCode, message } = parseLucidError(err, fastify.log);
+        return res.status(statusCode).send({
+          statusCode,
+          error: statusCode >= 500 ? "Internal Server Error" : "Bad Request",
+          message,
+        });
+      }
 
       return { unsignedTx: unsignedTxCbor };
     },
@@ -648,7 +712,11 @@ async function l1Routes(fastify) {
       let subbit;
       try {
         subbit = await tx.validator.getStateByTag(l, validatorAddress, tagToHex(tag));
-      } catch {
+      } catch (err) {
+        if (isNetworkError(err)) {
+          const { statusCode, message } = parseLucidError(err, fastify.log);
+          return res.status(statusCode).send({ statusCode, error: "Service Unavailable", message });
+        }
         return res.notFound(
           `Channel with tag "${tag}" not found on-chain.`,
         );
@@ -686,22 +754,32 @@ async function l1Routes(fastify) {
       l.selectWallet.fromAddress(changeAddress, lucidUtxos);
 
       // Build transaction
-      let txBuilder;
-      if (validatorRef) {
-        txBuilder = await tx.txs.expire.single(l, validatorRef, subbit);
-      } else {
-        const redeemer = tx.validator.expireRed();
-        txBuilder = tx.txs.expire.step(
-          l.newTx(),
-          subbit.utxo,
-          closed,
-          now,
-          redeemer,
-        );
-      }
+      let unsignedTxCbor;
+      try {
+        let txBuilder;
+        if (validatorRef) {
+          txBuilder = await tx.txs.expire.single(l, validatorRef, subbit);
+        } else {
+          const redeemer = tx.validator.expireRed();
+          txBuilder = tx.txs.expire.step(
+            l.newTx(),
+            subbit.utxo,
+            closed,
+            now,
+            redeemer,
+          );
+        }
 
-      const unsignedTx = await txBuilder.complete({ changeAddress });
-      const unsignedTxCbor = unsignedTx.toCBOR();
+        const unsignedTx = await txBuilder.complete({ changeAddress });
+        unsignedTxCbor = unsignedTx.toCBOR();
+      } catch (err) {
+        const { statusCode, message } = parseLucidError(err, fastify.log);
+        return res.status(statusCode).send({
+          statusCode,
+          error: statusCode >= 500 ? "Internal Server Error" : "Bad Request",
+          message,
+        });
+      }
 
       return { unsignedTx: unsignedTxCbor };
     },

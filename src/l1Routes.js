@@ -1,4 +1,5 @@
 import * as tx from "@subbit-tx/tx";
+import * as keys from "./db/keys.js";
 import { parseBigIntSafe, isNetworkError, parseLucidError } from "./errors.js";
 
 /**
@@ -303,18 +304,33 @@ async function l1Routes(fastify) {
         .map(formatChannelForSync)
         .filter(Boolean);
 
-      // POST to the existing /l1/sync endpoint (same Fastify instance)
-      const syncRes = await fastify.inject({
-        method: "POST",
-        url: "/l1/sync",
-        payload: channelsForSync,
-      });
+      // Call putL1 directly per channel instead of POSTing to /l1/sync,
+      // which sweeps ALL opened keytags and suspends any not in the payload
+      // (causing false suspensions when Blockfrost returns partial results).
+      const results = await Promise.all(
+        channelsForSync.map((ch) => {
+          const keytag = keys.keytag(
+            Buffer.from(ch.iouKey, "hex"),
+            Buffer.from(ch.tag, "hex"),
+          );
+          const l1Subbit = {
+            txId: Buffer.from(ch.txId, "hex"),
+            outputIdx: BigInt(ch.outputIdx),
+            subbitAmt: BigInt(ch.subbitAmt),
+            sub: BigInt(ch.sub),
+          };
+          return fastify.putL1(keytag, [l1Subbit]).then(
+            (r) => [ch.tag, r.kind === "Right" ? r.value : r.error],
+            (err) => [ch.tag, err.message],
+          );
+        }),
+      );
 
       return {
-        success: syncRes.statusCode < 400,
+        success: true,
         message: "Channels synced",
         channelCount: channelsForSync.length,
-        syncResult: JSON.parse(syncRes.payload),
+        syncResult: Object.fromEntries(results),
         timestamp: new Date().toISOString(),
       };
     },

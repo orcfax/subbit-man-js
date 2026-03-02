@@ -2,6 +2,7 @@
 
 # Default db
 /db/
+/db-local/
 
 # Logs
 logs

@@ -15,6 +15,7 @@ import * as tx from "@subbit-tx/tx";
  * @property {string} config.PROVIDER_KEY_HASH
  * @property {string} config.PROVIDER_SIGNING_KEY
  * @property {string} config.SUBBIT_REFERENCE_UTXO
+ * @property {string} config.CLOSE_PERIOD
  */
 
 /**
@@ -31,6 +32,7 @@ async function lucidPlugin(fastify) {
     PROVIDER_KEY_HASH: env("PROVIDER_KEY_HASH", ""),
     PROVIDER_SIGNING_KEY: env("PROVIDER_SIGNING_KEY", ""),
     SUBBIT_REFERENCE_UTXO: env("SUBBIT_REFERENCE_UTXO", ""),
+    CLOSE_PERIOD: env("CLOSE_PERIOD", "86400000"),
   };
 
   if (!config.BLOCKFROST_API_KEY) {

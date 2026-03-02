@@ -88,7 +88,7 @@ async function l1Routes(fastify) {
         iouKey: iouKey,
         consumer: consumerKeyHash,
         provider: config.PROVIDER_KEY_HASH,
-        closePeriod: 86400000n,
+        closePeriod: BigInt(config.CLOSE_PERIOD),
       };
 
       // Build transaction
